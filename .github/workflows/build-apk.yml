@@ -1,0 +1,51 @@
+name: Build Traffic Police APK
+
+on:
+  push:
+    paths:
+      - 'TrafficPolice_RuStore_READY.zip'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Unpack project
+        run: |
+          rm -rf buildsrc
+          mkdir buildsrc
+          unzip -q TrafficPolice_RuStore_READY.zip -d buildsrc
+          find buildsrc -maxdepth 3 -type f | sort
+
+      - name: Build APK
+        working-directory: buildsrc/TrafficPolice_RuStore
+        run: |
+          gradle --no-daemon assembleDebug --stacktrace
+
+      - name: Find APK
+        run: |
+          find buildsrc/TrafficPolice_RuStore -type f -name '*.apk' -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrafficPolice-APK
+          path: buildsrc/TrafficPolice_RuStore/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
