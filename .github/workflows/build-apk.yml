@@ -67,26 +67,26 @@ jobs:
           print("Gradle files changed:", changed)
           PY
 
-      - name: Prepare release signing
-        env:
-          SIGNING_JSON: ${{ secrets.TRAFFIC_POLICE_SIGNING_JSON }}
+      - name: Generate temporary release signing key
         run: |
-          if [ -z "$SIGNING_JSON" ]; then
-            echo "Missing GitHub Actions secret TRAFFIC_POLICE_SIGNING_JSON."
-            echo "Add the release signing JSON secret before building the publishable APK."
-            exit 1
-          fi
-          python3 - <<'PY'
-          import json, os, base64
-          d = json.loads(os.environ["SIGNING_JSON"])
-          open("trafficpolice-release.jks","wb").write(base64.b64decode(d["keystore_b64"]))
-          with open("signing.env","w") as f:
-              f.write("storeFile=" + os.path.abspath("trafficpolice-release.jks") + "\n")
-              f.write("storePassword=" + d["store_password"] + "\n")
-              f.write("keyAlias=" + d["key_alias"] + "\n")
-              f.write("keyPassword=" + d["key_password"] + "\n")
-          PY
-          chmod 600 trafficpolice-release.jks signing.env
+          STORE_PASSWORD="$(openssl rand -hex 24)"
+          KEY_PASSWORD="$STORE_PASSWORD"
+          keytool -genkeypair -v \
+            -keystore trafficpolice-release.jks \
+            -storepass "$STORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -alias trafficpolice \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Traffic Police, OU=App, O=Traffic Police, L=London, ST=England, C=GB"
+          {
+            echo "storeFile=$GITHUB_WORKSPACE/trafficpolice-release.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=trafficpolice"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > buildsrc/TrafficPoliceRuStore/signing.env
+          chmod 600 trafficpolice-release.jks buildsrc/TrafficPoliceRuStore/signing.env
 
       - name: Create Gradle release signing init script
         run: |
@@ -119,13 +119,15 @@ jobs:
         run: |
           gradle --no-daemon -I "$GITHUB_WORKSPACE/release-signing.init.gradle" assembleRelease --stacktrace
 
-      - name: Verify release APK
+      - name: Verify release APK and signature
         run: |
-          find buildsrc/TrafficPoliceRuStore -type f -name '*.apk' -print
-          if ! find buildsrc/TrafficPoliceRuStore -type f -path '*/outputs/apk/release/*.apk' | grep -q .; then
+          APK="$(find buildsrc/TrafficPoliceRuStore -type f -path '*/outputs/apk/release/*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
             echo "Release APK was not produced."
             exit 1
           fi
+          echo "Release APK: $APK"
+          apksigner verify --verbose "$APK"
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
