@@ -1,4 +1,4 @@
-name: Build Traffic Police APK
+name: Build Traffic Police Release APK
 
 on:
   push:
@@ -42,20 +42,94 @@ jobs:
           rm -rf buildsrc
           mkdir buildsrc
           unzip -q TrafficPolice_RuStore_READY.zip -d buildsrc
-          find buildsrc -maxdepth 3 -type f | sort
+          find buildsrc/TrafficPoliceRuStore -maxdepth 3 -type f | sort
 
-      - name: Build APK
+      - name: Configure release version
+        working-directory: buildsrc/TrafficPoliceRuStore
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          code = os.environ["VERSION_CODE"]
+          name = f"1.0.{code}"
+          files = list(Path(".").rglob("build.gradle")) + list(Path(".").rglob("build.gradle.kts"))
+          changed = 0
+          for p in files:
+              s = p.read_text()
+              ns = re.sub(r'(?m)(\\bversionCode\\s+)(\\d+)', r'\\g<1>' + code, s)
+              ns = re.sub(r'(?m)(\\bversionName\\s+)["\\\'][^"\\\']+["\\\']', r'\\g<1>"' + name + '"', ns)
+              if ns != s:
+                  p.write_text(ns)
+                  changed += 1
+                  print("Updated", p)
+          print("Gradle files changed:", changed)
+          PY
+
+      - name: Prepare release signing
+        env:
+          SIGNING_JSON: ${{ secrets.TRAFFIC_POLICE_SIGNING_JSON }}
+        run: |
+          if [ -z "$SIGNING_JSON" ]; then
+            echo "Missing GitHub Actions secret TRAFFIC_POLICE_SIGNING_JSON."
+            echo "Add the release signing JSON secret before building the publishable APK."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, base64
+          d = json.loads(os.environ["SIGNING_JSON"])
+          open("trafficpolice-release.jks","wb").write(base64.b64decode(d["keystore_b64"]))
+          with open("signing.env","w") as f:
+              f.write("storeFile=" + os.path.abspath("trafficpolice-release.jks") + "\n")
+              f.write("storePassword=" + d["store_password"] + "\n")
+              f.write("keyAlias=" + d["key_alias"] + "\n")
+              f.write("keyPassword=" + d["key_password"] + "\n")
+          PY
+          chmod 600 trafficpolice-release.jks signing.env
+
+      - name: Create Gradle release signing init script
+        run: |
+          cat > release-signing.init.gradle <<'EOF'
+          import java.util.Properties
+
+          def props = new Properties()
+          file(System.getenv("GITHUB_WORKSPACE") + "/buildsrc/TrafficPoliceRuStore/signing.env").withInputStream {
+              props.load(it)
+          }
+
+          allprojects {
+              afterEvaluate { project ->
+                  if (project.plugins.hasPlugin("com.android.application")) {
+                      def android = project.extensions.findByName("android")
+                      def signingConfigs = android.signingConfigs
+                      def cfg = signingConfigs.findByName("ciRelease") ?: signingConfigs.create("ciRelease")
+                      cfg.storeFile = project.file(props.getProperty("storeFile"))
+                      cfg.storePassword = props.getProperty("storePassword")
+                      cfg.keyAlias = props.getProperty("keyAlias")
+                      cfg.keyPassword = props.getProperty("keyPassword")
+                      android.buildTypes.getByName("release").signingConfig = cfg
+                  }
+              }
+          }
+          EOF
+
+      - name: Build release APK
         working-directory: buildsrc/TrafficPoliceRuStore
         run: |
-          gradle --no-daemon assembleDebug --stacktrace
+          gradle --no-daemon -I "$GITHUB_WORKSPACE/release-signing.init.gradle" assembleRelease --stacktrace
 
-      - name: Find APK
+      - name: Verify release APK
         run: |
           find buildsrc/TrafficPoliceRuStore -type f -name '*.apk' -print
+          if ! find buildsrc/TrafficPoliceRuStore -type f -path '*/outputs/apk/release/*.apk' | grep -q .; then
+            echo "Release APK was not produced."
+            exit 1
+          fi
 
-      - name: Upload APK
+      - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
-          name: TrafficPolice-APK
-          path: buildsrc/TrafficPoliceRuStore/app/build/outputs/apk/**/*.apk
+          name: TrafficPolice-Release-APK
+          path: buildsrc/TrafficPoliceRuStore/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
