@@ -25,8 +25,6 @@ jobs:
 
       - name: Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: ''
 
       - name: Install Android SDK packages
         run: |
@@ -62,7 +60,7 @@ jobs:
           for p in files:
               s = p.read_text()
               ns = re.sub(r'(?m)(\bversionCode\s+)(\d+)', r'\g<1>' + code, s)
-              ns = re.sub(r'(?m)(\bversionName\s+)["\'][^"\']+["\']', r'\g<1>"' + name + '"', ns)
+              ns = re.sub(r'(?m)(\bversionName\s+)[\"\'][^\"\']+[\"\']', r'\g<1>"' + name + '"', ns)
               if ns != s:
                   p.write_text(ns)
                   changed += 1
@@ -70,23 +68,28 @@ jobs:
           print("Gradle files changed:", changed)
           PY
 
-      - name: Generate temporary release signing key
+      - name: Prepare release signing
+        env:
+          KEYSTORE_B64: ${{ secrets.TRAFFICPOLICE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.TRAFFICPOLICE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.TRAFFICPOLICE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.TRAFFICPOLICE_KEY_PASSWORD }}
         run: |
-          STORE_PASSWORD="$(openssl rand -hex 24)"
-          KEY_PASSWORD="$STORE_PASSWORD"
-          keytool -genkeypair -v \
-            -keystore trafficpolice-release.jks \
-            -storepass "$STORE_PASSWORD" \
-            -keypass "$KEY_PASSWORD" \
-            -alias trafficpolice \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Traffic Police, OU=App, O=Traffic Police, L=London, ST=England, C=GB"
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > trafficpolice-release.jks
+            echo "Using persistent release signing key."
+          else
+            echo "WARNING: persistent signing secrets are not configured."
+            echo "Using a temporary key for this build only."
+            STORE_PASSWORD="$(openssl rand -hex 24)"
+            KEY_PASSWORD="$STORE_PASSWORD"
+            KEY_ALIAS="trafficpolice"
+            keytool -genkeypair -v               -keystore trafficpolice-release.jks               -storepass "$STORE_PASSWORD"               -keypass "$KEY_PASSWORD"               -alias "$KEY_ALIAS"               -keyalg RSA -keysize 2048 -validity 10000               -dname "CN=Traffic Police, OU=App, O=Traffic Police, C=RU"
+          fi
           {
             echo "storeFile=$GITHUB_WORKSPACE/trafficpolice-release.jks"
             echo "storePassword=$STORE_PASSWORD"
-            echo "keyAlias=trafficpolice"
+            echo "keyAlias=$KEY_ALIAS"
             echo "keyPassword=$KEY_PASSWORD"
           } > buildsrc/TrafficPoliceRuStore/signing.env
           chmod 600 trafficpolice-release.jks buildsrc/TrafficPoliceRuStore/signing.env
@@ -95,25 +98,20 @@ jobs:
         run: |
           cat > release-signing.init.gradle <<'EOF'
           import java.util.Properties
-
           def props = new Properties()
-          file(System.getenv("GITHUB_WORKSPACE") + "/buildsrc/TrafficPoliceRuStore/signing.env").withInputStream {
-              props.load(it)
-          }
-
+          file(System.getenv("GITHUB_WORKSPACE") + "/buildsrc/TrafficPoliceRuStore/signing.env").withInputStream { props.load(it) }
           allprojects {
-              afterEvaluate { project ->
-                  if (project.plugins.hasPlugin("com.android.application")) {
-                      def android = project.extensions.findByName("android")
-                      def signingConfigs = android.signingConfigs
-                      def cfg = signingConfigs.findByName("ciRelease") ?: signingConfigs.create("ciRelease")
-                      cfg.storeFile = project.file(props.getProperty("storeFile"))
-                      cfg.storePassword = props.getProperty("storePassword")
-                      cfg.keyAlias = props.getProperty("keyAlias")
-                      cfg.keyPassword = props.getProperty("keyPassword")
-                      android.buildTypes.getByName("release").signingConfig = cfg
-                  }
+            afterEvaluate { project ->
+              if (project.plugins.hasPlugin("com.android.application")) {
+                def android = project.extensions.findByName("android")
+                def cfg = android.signingConfigs.findByName("ciRelease") ?: android.signingConfigs.create("ciRelease")
+                cfg.storeFile = project.file(props.getProperty("storeFile"))
+                cfg.storePassword = props.getProperty("storePassword")
+                cfg.keyAlias = props.getProperty("keyAlias")
+                cfg.keyPassword = props.getProperty("keyPassword")
+                android.buildTypes.getByName("release").signingConfig = cfg
               }
+            }
           }
           EOF
 
@@ -134,6 +132,8 @@ jobs:
           test "$SIZE" -gt 12000
           unzip -t "$APK"
           unzip -l "$APK" | grep -q 'assets/index.html'
+          unzip -l "$APK" | grep -q 'classes.dex'
+          unzip -l "$APK" | grep -q 'AndroidManifest.xml'
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
           mkdir -p dist
           cp "$APK" dist/TrafficPolice_RuStore.apk
