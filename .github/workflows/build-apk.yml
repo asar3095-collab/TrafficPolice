@@ -7,11 +7,12 @@ on:
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,6 +43,8 @@ jobs:
           rm -rf buildsrc
           mkdir buildsrc
           unzip -q TrafficPolice_RuStore_READY.zip -d buildsrc
+          test -d buildsrc/TrafficPoliceRuStore/app
+          test -f buildsrc/TrafficPoliceRuStore/app/src/main/assets/index.html
           find buildsrc/TrafficPoliceRuStore -maxdepth 3 -type f | sort
 
       - name: Configure release version
@@ -58,8 +61,8 @@ jobs:
           changed = 0
           for p in files:
               s = p.read_text()
-              ns = re.sub(r'(?m)(\\bversionCode\\s+)(\\d+)', r'\\g<1>' + code, s)
-              ns = re.sub(r'(?m)(\\bversionName\\s+)["\\\'][^"\\\']+["\\\']', r'\\g<1>"' + name + '"', ns)
+              ns = re.sub(r'(?m)(\bversionCode\s+)(\d+)', r'\g<1>' + code, s)
+              ns = re.sub(r'(?m)(\bversionName\s+)["\'][^"\']+["\']', r'\g<1>"' + name + '"', ns)
               if ns != s:
                   p.write_text(ns)
                   changed += 1
@@ -119,19 +122,28 @@ jobs:
         run: |
           gradle --no-daemon -I "$GITHUB_WORKSPACE/release-signing.init.gradle" assembleRelease --stacktrace
 
-      - name: Verify release APK and signature
+      - name: Verify APK integrity, contents and signature
+        shell: bash
         run: |
+          set -euo pipefail
           APK="$(find buildsrc/TrafficPoliceRuStore -type f -path '*/outputs/apk/release/*.apk' | head -n 1)"
-          if [ -z "$APK" ]; then
-            echo "Release APK was not produced."
-            exit 1
-          fi
-          echo "Release APK: $APK"
+          test -n "$APK"
+          test -s "$APK"
+          SIZE="$(stat -c '%s' "$APK")"
+          echo "Built APK: $APK ($SIZE bytes)"
+          test "$SIZE" -gt 12000
+          unzip -t "$APK"
+          unzip -l "$APK" | grep -q 'assets/index.html'
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+          mkdir -p dist
+          cp "$APK" dist/TrafficPolice_RuStore.apk
+          sha256sum dist/TrafficPolice_RuStore.apk | tee dist/SHA256SUMS.txt
+          echo "APK validation passed."
 
-      - name: Upload release APK
+      - name: Upload validated RuStore APK
         uses: actions/upload-artifact@v4
         with:
-          name: TrafficPolice-Release-APK
-          path: buildsrc/TrafficPoliceRuStore/app/build/outputs/apk/release/*.apk
+          name: TrafficPolice-RuStore-APK
+          path: dist/*
           if-no-files-found: error
+          compression-level: 0
